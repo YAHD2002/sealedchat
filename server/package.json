@@ -1,0 +1,14 @@
+{
+  "name": "sealedchat-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "ethers": "^6.17.0",
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}
