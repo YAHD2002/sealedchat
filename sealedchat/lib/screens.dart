@@ -1,8 +1,11 @@
 import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'chain.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'chat_page.dart';
+import 'chat_service.dart';
 import 'crypto_service.dart';
 import 'theme.dart';
 import 'vault.dart';
@@ -42,9 +45,11 @@ Future<void> _registerWithServer(String base, String user, KeyPair kp) async {
   if (r.statusCode != 200) throw jsonDecode(r.body)['error'];
 }
 
-void _openHome(BuildContext context, String base, String me, KeyPair kp) =>
-    Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => HomePage(base: base, me: me, keyPair: kp)), (_) => false);
+void _openHome(BuildContext context, String base, String me, KeyPair kp) {
+  final svc = ChatService(base, me, kp)..start();
+  Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => HomePage(svc: svc)), (_) => false);
+}
 
 class WelcomePage extends StatefulWidget {
   const WelcomePage({super.key});
@@ -274,50 +279,194 @@ class _UnlockPageState extends State<UnlockPage> {
       );
 }
 
-/// Temporary home screen. The chat list and contacts come in the next step.
+/// WhatsApp-style home screen: contacts sorted by last message, with unread counts.
 class HomePage extends StatefulWidget {
-  final String base, me;
-  final KeyPair keyPair;
-  const HomePage({super.key, required this.base, required this.me, required this.keyPair});
+  final ChatService svc;
+  const HomePage({super.key, required this.svc});
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
-  final peer = TextEditingController();
+  List<String> contacts = [];
+  ChatService get svc => widget.svc;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          title: Text('Hello, ${widget.me}'),
+  void initState() {
+    super.initState();
+    svc.addListener(_changed);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    svc.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    for (final k in svc.chats.keys) { // a new sender becomes a contact
+      if (!contacts.contains(k)) {
+        contacts.add(k);
+        _save();
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _load() async {
+    final list = (await SharedPreferences.getInstance()).getStringList('contacts') ?? [];
+    for (final c in list) {
+      await svc.load(c);
+    }
+    if (mounted) setState(() => contacts = list);
+  }
+
+  Future<void> _save() async =>
+      (await SharedPreferences.getInstance()).setStringList('contacts', contacts);
+
+  int _last(String c) {
+    final l = svc.chats[c];
+    return l == null || l.isEmpty ? 0 : l.last.ts;
+  }
+
+  Future<void> _add() async {
+    final name = TextEditingController();
+    String error = '';
+    bool busy = false;
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Add contact'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+                controller: name,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Username')),
+            if (error.isNotEmpty)
+              Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(error, style: TextStyle(color: Theme.of(ctx).colorScheme.error))),
+          ]),
           actions: [
-            IconButton(
-                icon: const Icon(Icons.lock_outline),
-                tooltip: 'Lock',
-                onPressed: () => Navigator.of(context).pushAndRemoveUntil(
-                    MaterialPageRoute(builder: (_) => UnlockPage(name: widget.me)), (_) => false)),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      final u = name.text.trim();
+                      if (u.isEmpty) return;
+                      if (u == svc.me) {
+                        setD(() => error = 'That is you.');
+                        return;
+                      }
+                      if (contacts.contains(u)) {
+                        setD(() => error = 'Already in your contacts.');
+                        return;
+                      }
+                      setD(() {
+                        busy = true;
+                        error = '';
+                      });
+                      try {
+                        final h = await Chain.keyHashOf(u);
+                        if (h == '0x${'0' * 64}') {
+                          setD(() {
+                            busy = false;
+                            error = '$u is not registered on Sepolia.';
+                          });
+                          return;
+                        }
+                        setState(() => contacts.add(u));
+                        await _save();
+                        if (ctx.mounted) Navigator.pop(ctx);
+                      } catch (e) {
+                        setD(() {
+                          busy = false;
+                          error = 'Could not check Sepolia: $e';
+                        });
+                      }
+                    },
+              child: Text(busy ? 'Checking Sepolia…' : 'Add'),
+            ),
           ],
         ),
-        body: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: ListView(shrinkWrap: true, padding: const EdgeInsets.all(20), children: [
-              TextField(
-                  controller: peer,
-                  decoration: const InputDecoration(labelText: 'Start a chat with (username)')),
-              const SizedBox(height: 16),
-              FilledButton(
-                onPressed: () {
-                  final other = peer.text.trim();
-                  if (other.isEmpty) return;
-                  Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => ChatPage(
-                          base: widget.base, me: widget.me, peer: other, keyPair: widget.keyPair)));
-                },
-                child: const Text('Open chat'),
-              ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final sorted = [...contacts]..sort((a, b) => _last(b).compareTo(_last(a)));
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(children: [
+          const BrandMark(size: 30),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('SealedChat'),
+            Text('${svc.me} · ${svc.connection}',
+                style: const TextStyle(fontSize: 12, color: Colors.white60)),
+          ]),
+        ]),
+        actions: [
+          IconButton(
+              icon: const Icon(Icons.lock_outline),
+              tooltip: 'Lock',
+              onPressed: () {
+                final me = svc.me;
+                svc.dispose();
+                Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (_) => UnlockPage(name: me)), (_) => false);
+              }),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+          onPressed: _add,
+          icon: const Icon(Icons.person_add_alt_1),
+          label: const Text('Add contact')),
+      body: sorted.isEmpty
+          ? const Center(
+              child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Text(
+                      'No contacts yet.\nTap Add contact and enter a username registered on Sepolia.',
+                      textAlign: TextAlign.center)))
+          : ListView(children: [
+              for (final c in sorted)
+                Dismissible(
+                  key: ValueKey(c),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                      color: cs.errorContainer,
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.only(right: 20),
+                      child: const Icon(Icons.delete_outline)),
+                  onDismissed: (_) {
+                    setState(() => contacts.remove(c));
+                    _save();
+                    svc.forget(c); // also deletes the saved history
+                  },
+                  child: ListTile(
+                    leading: CircleAvatar(
+                        backgroundColor: kPurple,
+                        foregroundColor: Colors.white,
+                        child: Text(c[0].toUpperCase())),
+                    title: Text(c),
+                    subtitle: Text(
+                        (svc.chats[c]?.isNotEmpty ?? false)
+                            ? '${svc.chats[c]!.last.mine ? 'You: ' : ''}${svc.chats[c]!.last.text}'
+                            : 'Encrypted · verified on Sepolia',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                    trailing: (svc.unread[c] ?? 0) > 0 ? Badge(label: Text('${svc.unread[c]}')) : null,
+                    onTap: () => Navigator.of(context)
+                        .push(MaterialPageRoute(builder: (_) => ChatPage(svc: svc, peer: c))),
+                  ),
+                ),
             ]),
-          ),
-        ),
-      );
+    );
+  }
 }
