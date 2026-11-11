@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'chain.dart';
 import 'chat_service.dart';
+import 'security_page.dart';
 
 class ChatPage extends StatefulWidget {
   final ChatService svc;
@@ -64,7 +65,13 @@ class _ChatPageState extends State<ChatPage> {
           Text(widget.peer),
           Text(widget.svc.connection, style: const TextStyle(fontSize: 12, color: Colors.white60)),
         ]),
-        actions: [IconButton(icon: const Icon(Icons.info_outline), tooltip: 'Registry', onPressed: _info)],
+       actions: [
+  IconButton(
+      icon: const Icon(Icons.shield_outlined),
+      tooltip: 'Security',
+      onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => SecurityPage(svc: widget.svc, peer: widget.peer)))),
+      ],
       ),
       body: Column(children: [
         if (notice.isNotEmpty)

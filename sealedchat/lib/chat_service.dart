@@ -13,14 +13,22 @@ class Bubble {
   bool ok;
   final bool mine;
   final int ts;
-  Bubble(this.text, this.status, this.ok, this.mine, [int? ts])
+  String? tx; // the Sepolia transaction that anchored this message
+  Bubble(this.text, this.status, this.ok, this.mine, {int? ts, this.tx})
       : ts = ts ?? DateTime.now().millisecondsSinceEpoch;
-  Map<String, dynamic> toJson() => {'t': text, 's': status, 'o': ok, 'm': mine, 'ts': ts};
+  Map<String, dynamic> toJson() => {'t': text, 's': status, 'o': ok, 'm': mine, 'ts': ts, 'x': tx};
   factory Bubble.fromJson(Map<String, dynamic> j) =>
-      Bubble(j['t'], j['s'], j['o'], j['m'], j['ts']);
+      Bubble(j['t'], j['s'], j['o'], j['m'], ts: j['ts'], tx: j['x']);
 }
 
 String short(String t) => t.length > 12 ? '${t.substring(0, 10)}…' : t;
+
+/// Result of comparing a contact's key on Sepolia with the key the server gives out.
+class KeyCheck {
+  final String onChain, serverHash, safety, problem;
+  final bool match;
+  KeyCheck(this.onChain, this.serverHash, this.safety, this.match, [this.problem = '']);
+}
 
 /// Keeps one WebSocket open, verifies every incoming message against Sepolia,
 /// and stores each chat's history encrypted on the device.
@@ -123,6 +131,24 @@ class ChatService extends ChangeNotifier {
     return _pinned[user] = pub;
   }
 
+  /// Fresh check used by the security dashboard (never uses the pinned key).
+  Future<KeyCheck> checkKey(String user) async {
+    final onChain = await Chain.keyHashOf(user);
+    final r = await http.get(Uri.parse('$base/keys/$user'));
+    if (r.statusCode != 200) {
+      return KeyCheck(onChain, '', '', false,
+          'The server has no key for $user. They may need to unlock their app.');
+    }
+    final pub = jsonDecode(r.body)['publicKey'] as String;
+    final serverHash = '0x${await CryptoService.sha256Hex(pub)}';
+    final pair = [await CryptoService.exportPublic(keyPair), pub]..sort();
+    final digits = (await CryptoService.sha256Hex(pair.join('|'))).substring(0, 30);
+    final safety = [for (var i = 0; i < 30; i += 5) digits.substring(i, i + 5)].join(' ');
+    final zero = '0x${'0' * 64}';
+    return KeyCheck(onChain, serverHash, safety, onChain == serverHash && onChain != zero,
+        onChain == zero ? '$user is not registered on Sepolia.' : '');
+  }
+
   Future<void> _onWs(dynamic raw) async {
     final m = jsonDecode(raw as String) as Map<String, dynamic>;
     if (m['type'] == 'ack' || m['type'] == 'error') {
@@ -130,6 +156,7 @@ class ChatService extends ChangeNotifier {
       if (r == null) return;
       if (m['type'] == 'ack') {
         r.$2.status = 'Sent, anchored on Sepolia (tx ${short(m['tx'])})';
+        r.$2.tx = m['tx'];
       } else {
         r.$2.status = 'Failed: ${m['error']}';
         r.$2.ok = false;
@@ -142,24 +169,24 @@ class ChatService extends ChangeNotifier {
   }
 
   Future<void> _receive(Map<String, dynamic> m) async {
-    final from = m['from'] as String;
+    final from = m['from'] as String, tx = m['tx'] as String?;
     try {
       final anchored = await Chain.anchorOf(m['id'] as String);
       final want = '0x${await CryptoService.sha256Hex(m['payload'])}';
       if (anchored != want) {
         return _add(from, Bubble('Message hidden',
-            'Tampered or not anchored: ciphertext does not match the Sepolia record', false, false));
+            'Tampered or not anchored: ciphertext does not match the Sepolia record', false, false, tx: tx));
       }
       final k = await _peerKey(from);
       if (k == null) {
-        return _add(from,
-            Bubble('Message hidden', 'Sender’s key does not match the Sepolia record', false, false));
+        return _add(from, Bubble('Message hidden',
+            'Sender’s key does not match the Sepolia record', false, false, tx: tx));
       }
       final shared = await CryptoService.sharedKey(keyPair, k);
       final t = await CryptoService.decrypt(m['payload'], shared);
-      await _add(from, Bubble(t, 'Verified on Sepolia', true, false));
+      await _add(from, Bubble(t, 'Verified on Sepolia', true, false, tx: tx));
     } catch (e) {
-      await _add(from, Bubble('Message hidden', 'Could not verify: $e', false, false));
+      await _add(from, Bubble('Message hidden', 'Could not verify: $e', false, false, tx: tx));
     }
   }
 

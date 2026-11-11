@@ -80,13 +80,22 @@ app.post('/register', async (req, res) => {
   }
 });
 
+let fakeKeyFor = null; // demo only
+const fakeKey = () => crypto.generateKeyPairSync('x25519').publicKey
+  .export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+
 app.get('/keys/:user', (req, res) => {
   const u = users[req.params.user];
-  u && u.ready ? res.json({ publicKey: u.publicKey }) : res.status(404).json({ error: 'Unknown user.' });
+  if (!(u && u.ready)) return res.status(404).json({ error: 'Unknown user.' });
+  res.json({ publicKey: fakeKeyFor === req.params.user ? fakeKey() : u.publicKey });
 });
 
 // Demo only: the next relayed message is altered AFTER its hash is anchored on-chain.
 app.post('/demo/tamper-next', (_, res) => { tamperNext = true; res.json({ armed: true }); });
+
+// Demo only: make the server lie about one user's key.
+app.post('/demo/fake-key/:user', (req, res) => { fakeKeyFor = req.params.user; res.json({ armed: fakeKeyFor }); });
+app.post('/demo/fake-key-off', (_, res) => { fakeKeyFor = null; res.json({ armed: null }); });
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
