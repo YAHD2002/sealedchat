@@ -49,17 +49,30 @@ app.post('/register', async (req, res) => {
   const { user, publicKey } = req.body || {};
   if (!/^[A-Za-z0-9_]{2,20}$/.test(user || '') || !publicKey)
     return res.status(400).json({ error: 'Use a name of 2-20 letters, digits or underscores.' });
-  if (users[user]) return res.status(409).json({ error: 'That name is taken.' });
-  users[user] = { publicKey, ready: false }; // reserve while the transaction is pending
+
+  const cur = users[user];
+  if (cur) { // same person coming back during this server session
+    if (cur.ready && cur.publicKey === publicKey) return res.json({ tx: null, returning: true });
+    return res.status(409).json({ error: 'That name is taken.' });
+  }
+  users[user] = { publicKey, ready: false }; // reserve while checking the chain
   try {
-    if ((await registry.keyOf(b32(user))) !== ZeroHash) throw new Error('That name is already registered on-chain. Use a new name.');
+    const existing = await registry.keyOf(b32(user));
+    if (existing !== ZeroHash) {
+      // Already on Sepolia: accept only if it is the SAME key (a returning user).
+      if (existing.toLowerCase() === b32(publicKey).toLowerCase()) {
+        users[user].ready = true;
+        return res.json({ tx: null, returning: true });
+      }
+      throw new Error('That name is already registered to a different key. Use another name.');
+    }
     const tx = await onChain(async () => {
       const t = await registry.registerKey(b32(user), b32(publicKey));
       await t.wait();
       return t.hash;
     });
     users[user].ready = true;
-    res.json({ tx, keyHash: sha(publicKey) });
+    res.json({ tx });
   } catch (e) {
     delete users[user];
     console.error('register failed:', errText(e));

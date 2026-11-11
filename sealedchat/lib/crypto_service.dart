@@ -15,6 +15,19 @@ class CryptoService {
     return base64Encode(pk.bytes);
   }
 
+  /// Private key as base64 (used to save the identity on the device).
+  static Future<String> exportPrivate(KeyPair kp) async {
+    final data = await kp.extract() as SimpleKeyPairData;
+    return base64Encode(await data.extractPrivateKeyBytes());
+  }
+
+  /// Rebuilds a saved key pair from its base64 private and public keys.
+  static KeyPair importKeyPair(String privB64, String pubB64) => SimpleKeyPairData(
+        base64Decode(privB64),
+        publicKey: SimplePublicKey(base64Decode(pubB64), type: KeyPairType.x25519),
+        type: KeyPairType.x25519,
+      );
+
   static SimplePublicKey _importPublic(String b64) =>
       SimplePublicKey(base64Decode(b64), type: KeyPairType.x25519);
 
